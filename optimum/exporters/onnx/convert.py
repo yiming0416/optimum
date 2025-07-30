@@ -18,6 +18,7 @@ import copy
 import gc
 import multiprocessing as mp
 import os
+import tempfile
 import traceback
 from inspect import signature
 from itertools import chain
@@ -26,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import onnx
+from torch._C._nativert import PyModelRunner
 from transformers.generation import GenerationMixin
 from transformers.modeling_utils import get_parameter_dtype
 from transformers.utils import is_tf_available, is_torch_available
@@ -561,6 +563,87 @@ def export_pytorch(
                 dynamix_axes = None
             else:
                 dynamix_axes = dict(chain(inputs.items(), config.outputs.items()))
+
+            # export + nativert
+            ep = torch.export.export(
+                model,
+                (),
+                dummy_inputs,
+            )
+            ep = ep.run_decompositions()
+            with tempfile.NamedTemporaryFile(delete=False) as f:
+                torch.export.pt2_archive._package.package_pt2(
+                    f, exported_programs={"forward": ep}
+                )
+                filename = f.name
+            nativert_runner = PyModelRunner(filename, "forward")
+
+            # torchscript
+            traced_model = torch.jit.trace(
+                func=model, example_kwarg_inputs=dummy_inputs, strict=False
+            )
+
+            # Save the traced model to a file
+            # torchscript_model_path = f"traced_model_{device}.pt"
+            # torch.jit.save(traced_model, torchscript_model_path)
+            # logger.info(f"Traced model saved to: {torchscript_model_path}")
+
+            def run_eager():
+                _ = model(**dummy_inputs)
+
+            def run_torchscript():
+                _ = traced_model(**dummy_inputs)
+
+            def run_nativert():
+                _ = nativert_runner.run(**dummy_inputs)
+
+            def warm_up(func, num_warmups=40):
+                for _ in range(num_warmups):
+                    func()
+
+            def benchmark_function(func, num_runs=400):
+                """Benchmark a function with device-aware timing."""
+                warm_up(func)
+
+                total_time = 0
+
+                if str(device).startswith("cuda") and torch.cuda.is_available():
+                    # Use CUDA events for precise GPU timing
+                    start_event = torch.cuda.Event(enable_timing=True)
+                    end_event = torch.cuda.Event(enable_timing=True)
+
+                    for _ in range(num_runs):
+                        start_event.record()
+                        func()
+                        end_event.record()
+                        torch.cuda.synchronize()
+                        total_time += start_event.elapsed_time(end_event)
+                else:
+                    # Use time.perf_counter for CPU timing
+                    import time
+
+                    for _ in range(num_runs):
+                        start_time = time.perf_counter()
+                        func()
+                        end_time = time.perf_counter()
+                        total_time += (
+                            end_time - start_time
+                        ) * 1000  # Convert to milliseconds
+
+                return total_time / num_runs
+
+            # Benchmark all execution methods
+            eager_avg_latency = benchmark_function(run_eager)
+            nativert_avg_latency = benchmark_function(run_nativert)
+            torchscript_avg_latency = benchmark_function(run_torchscript)
+
+            with open(f"benchmark_log_{device}.txt", "a") as f:
+                f.write(f"Eager Average Latency: {eager_avg_latency:.4f} ms\n")
+                f.write(
+                    f"TorchScript Average Latency: {torchscript_avg_latency:.4f} ms\n"
+                )
+                f.write(f"NativeRT Average Latency: {nativert_avg_latency:.4f} ms\n\n")
+
 
             # Export can work with named args but the dict containing named args has to be the last element of the args
             # tuple.

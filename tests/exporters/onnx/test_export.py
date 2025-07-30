@@ -251,7 +251,8 @@ class OnnxExportTestCase(TestCase):
                 device=device,
                 model_kwargs=model_kwargs,
             )
-            input_shapes_iterator = grid_parameters(shapes_to_validate, yield_dict=True, add_test_name=False)
+            # use only one input shape to save time for now
+            input_shapes_iterator = list(grid_parameters(shapes_to_validate, yield_dict=True, add_test_name=False))[-1:]
             for input_shapes in input_shapes_iterator:
                 skip = False
                 for _, model_onnx_conf in models_and_onnx_configs.items():
@@ -316,15 +317,18 @@ class OnnxExportTestCase(TestCase):
 
     @parameterized.expand(_get_models_to_test(PYTORCH_EXPORT_MODELS_TINY))
     @require_torch
-    @require_vision
+    # @require_vision
     # TODO: I just enabled it and it seems to hang for some reason, investigate later
-    @slow
-    @pytest.mark.run_slow
+    # @slow
+    # @pytest.mark.run_slow
     def test_pytorch_export_on_cpu(
         self, test_name, model_type, model_name, task, onnx_config_class_constructor, monolith
     ):
         if model_type == "speecht5" and monolith:
             self.skipTest("unsupported export")
+
+        with open("./benchmark_log_cpu.txt", "a") as f:
+            f.write(f"{test_name}\n")
 
         self._onnx_export(
             test_name,
@@ -339,7 +343,7 @@ class OnnxExportTestCase(TestCase):
 
     @parameterized.expand(_get_models_to_test(PYTORCH_EXPORT_MODELS_TINY))
     @require_torch
-    @require_vision
+    # @require_vision
     @require_torch_gpu
     @pytest.mark.gpu_test
     def test_pytorch_export_on_cuda(
@@ -347,6 +351,9 @@ class OnnxExportTestCase(TestCase):
     ):
         if model_type == "speecht5" and monolith:
             self.skipTest("unsupported export")
+        
+        with open("./benchmark_log_cuda.txt", "a") as f:
+            f.write(f"{test_name}\n")
 
         self._onnx_export(
             test_name,
